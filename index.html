@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>JUMP CUBE</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #111;
+    overflow: hidden;
+    touch-action: manipulation;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    background: #222;
+    width: 800px;
+    height: 400px;
+    max-width: 100vw;
+    max-height: 100vh;
+    aspect-ratio: 2 / 1;
+    box-shadow: 0 0 30px rgba(0, 0, 0, 0.6);
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="400"></canvas>
+
+<script>
+(() => {
+  'use strict';
+
+  const W = 800;
+  const H = 400;
+  const GROUND_Y = 340;          // 地面の高さ
+  const STEP = 1000 / 60;        // 固定タイムステップ(60fps)
+
+  const STATE = { TITLE: 0, PLAYING: 1, GAMEOVER: 2 };
+
+  // ---------- プレイヤー ----------
+  class Player {
+    constructor() {
+      this.size = 40;
+      this.x = 80;
+      this.gravity = 0.8;
+      this.jumpPower = -14.5;
+      this.reset();
+    }
+    reset() {
+      this.y = GROUND_Y - this.size;
+      this.vy = 0;
+      this.onGround = true;
+    }
+    jump() {
+      if (!this.onGround) return;   // 空中ジャンプ不可
+      this.vy = this.jumpPower;
+      this.onGround = false;
+    }
+    update() {
+      this.vy += this.gravity;
+      this.y += this.vy;
+      if (this.y >= GROUND_Y - this.size) {
+        this.y = GROUND_Y - this.size;
+        this.vy = 0;
+        this.onGround = true;
+      }
+    }
+    draw(ctx) {
+      ctx.fillStyle = '#3498db';
+      ctx.fillRect(this.x, this.y, this.size, this.size);
+    }
+    // 少しだけ判定を小さくして理不尽さを軽減
+    get hitbox() {
+      const m = 4;
+      return { x: this.x + m, y: this.y + m, w: this.size - m * 2, h: this.size - m * 2 };
+    }
+  }
+
+  // ---------- 障害物 ----------
+  class Obstacle {
+    constructor() {
+      this.w = 28 + Math.random() * 18;   // 28〜46
+      this.h = 30 + Math.random() * 28;   // 30〜58
+      this.x = W;
+      this.y = GROUND_Y - this.h;
+    }
+    update(speed) {
+      this.x -= speed;
+    }
+    get offscreen() {
+      return this.x + this.w < 0;
+    }
+    draw(ctx) {
+      ctx.fillStyle = '#e74c3c';
+      ctx.fillRect(this.x, this.y, this.w, this.h);
+    }
+    get hitbox() {
+      const m = 3;
+      return { x: this.x + m, y: this.y + m, w: this.w - m * 2, h: this.h - m * 2 };
+    }
+  }
+
+  // ---------- ゲーム管理 ----------
+  class Game {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d');
+      this.player = new Player();
+      this.obstacles = [];
+      this.state = STATE.TITLE;
+      this.score = 0;
+      this.frames = 0;
+      this.speed = 6;
+      this.nextGap = 0;
+      this.lastInputTime = 0;
+      this.acc = 0;
+      this.lastTime = performance.now();
+      this.bindInput();
+      requestAnimationFrame(t => this.loop(t));
+    }
+
+    bindInput() {
+      window.addEventListener('keydown', e => {
+        if (e.code === 'Space') {
+          e.preventDefault();
+          if (!e.repeat) this.handleInput();
+        }
+      });
+      // マウス/タッチ/ペンをまとめて処理
+      window.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        this.handleInput();
+      }, { passive: false });
+    }
+
+    handleInput() {
+      const now = performance.now();
+      switch (this.state) {
+        case STATE.TITLE:
+          this.start();
+          break;
+        case STATE.PLAYING:
+          this.player.jump();
+          break;
+        case STATE.GAMEOVER:
+          // 連打による誤リスタート防止
+          if (now - this.lastInputTime > 400) this.start();
+          break;
+      }
+    }
+
+    start() {
+      this.player.reset();
+      this.obstacles = [];
+      this.score = 0;
+      this.frames = 0;
+      this.speed = 6;
+      this.nextGap = this.calcGap();
+      this.state = STATE.PLAYING;
+    }
+
+    gameOver() {
+      this.state = STATE.GAMEOVER;
+      this.lastInputTime = performance.now();
+    }
+
+    calcGap() {
+      // ジャンプで越えられる距離を速度に応じて確保しつつランダム化
+      const min = this.speed * 40 + 80;
+      return min + Math.random() * 220;
+    }
+
+    collide(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x &&
+             a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    update() {
+      if (this.state !== STATE.PLAYING) return;
+
+      this.frames++;
+      this.score = Math.floor(this.frames / 6);
+      // 徐々に加速（上限あり）
+      this.speed = Math.min(6 + this.frames * 0.0015, 16);
+
+      this.player.update();
+
+      // 障害物の生成
+      const last = this.obstacles[this.obstacles.length - 1];
+      if (!last || W - (last.x + last.w) >= this.nextGap) {
+        this.obstacles.push(new Obstacle());
+        this.nextGap = this.calcGap();
+      }
+
+      for (const o of this.obstacles) o.update(this.speed);
+      this.obstacles = this.obstacles.filter(o => !o.offscreen);
+
+      // 当たり判定
+      const ph = this.player.hitbox;
+      for (const o of this.obstacles) {
+        if (this.collide(ph, o.hitbox)) {
+          this.gameOver();
+          break;
+        }
+      }
+    }
+
+    drawText(text, x, y, size, color, align = 'center') {
+      const ctx = this.ctx;
+      ctx.fillStyle = color;
+      ctx.font = `bold ${size}px "Courier New", monospace`;
+      ctx.textAlign = align;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, x, y);
+    }
+
+    draw() {
+      const ctx = this.ctx;
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(0, 0, W, H);
+
+      // 地面
+      ctx.fillStyle = '#555';
+      ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+      ctx.fillStyle = '#888';
+      ctx.fillRect(0, GROUND_Y, W, 2);
+
+      // 地面の流れる目印
+      if (this.state !== STATE.TITLE) {
+        const off = (this.frames * this.speed) % 40;
+        ctx.fillStyle = '#666';
+        for (let x = -off; x < W; x += 40) {
+          ctx.fillRect(x, GROUND_Y + 20, 20, 3);
+        }
+      }
+
+      this.player.draw(ctx);
+      for (const o of this.obstacles) o.draw(ctx);
+
+      // スコア（右上）
+      this.drawText('SCORE: ' + this.score, W - 20, 28, 22, '#fff', 'right');
+
+      const blink = Math.floor(performance.now() / 500) % 2 === 0;
+
+      if (this.state === STATE.TITLE) {
+        this.drawText('JUMP CUBE', W / 2, 140, 64, '#fff');
+        if (blink) this.drawText('Press Space or Tap to Start', W / 2, 220, 24, '#ddd');
+      } else if (this.state === STATE.GAMEOVER) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.fillRect(0, 0, W, H);
+        this.drawText('GAME OVER', W / 2, 130, 68, '#e74c3c');
+        this.drawText('FINAL SCORE: ' + this.score, W / 2, 205, 30, '#fff');
+        if (blink) this.drawText('Press Space or Tap to Restart', W / 2, 265, 24, '#ddd');
+      }
+    }
+
+    loop(now) {
+      // 固定タイムステップ：高リフレッシュレートでも速度が変わらない
+      this.acc += Math.min(now - this.lastTime, 100);
+      this.lastTime = now;
+      while (this.acc >= STEP) {
+        this.update();
+        this.acc -= STEP;
+      }
+      this.draw();
+      requestAnimationFrame(t => this.loop(t));
+    }
+  }
+
+  new Game(document.getElementById('game'));
+})();
+</script>
+</body>
+</html>
